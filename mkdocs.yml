@@ -1,0 +1,63 @@
+site_name: Forge Docs
+site_url: https://github.com/your-org/forge
+site_author: Forge
+site_description: Forge Triton kernels and training optimization platform
+
+theme:
+  name: material
+  features:
+    - navigation.footer
+    - toc.follow
+    - navigation.top
+    - navigation.sections
+  palette:
+    - scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+      primary: green
+      accent: indigo
+    - scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+      primary: blue
+      accent: indigo
+
+nav:
+  - Home: index.md
+  - Forge:
+      - Scaffold: forge/scaffold.md
+      - Kernel Deliverable: forge/kernel-deliverable.md
+      - GitHub Setup: forge/github-setup.md
+  - Kernel Notes: kernels/README.md
+
+markdown_extensions:
+  - attr_list
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - pymdownx.details
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_root_heading: true
+            show_source: true
+            docstring_style: google
+            heading_level: 3
+
+repo_name: forge
+repo_url: https://github.com/your-org/forge
+edit_uri: edit/main/docs/

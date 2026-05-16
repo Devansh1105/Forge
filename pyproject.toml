@@ -1,0 +1,104 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-kernel"
+version = "0.0.0"
+description = "Forge Triton kernels and training optimization tooling"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Forge contributors" },
+]
+dependencies = [
+    "torch>=2.1.2",
+    "triton>=2.3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.1.2",
+    "pytest-cov",
+    "pytest-xdist",
+    "ruff>=0.12.0",
+    "transformers>=4.52.0",
+]
+docs = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/forge"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["forge*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+asyncio_mode = "auto"
+log_cli = true
+log_cli_level = "INFO"
+addopts = [
+    "--cov=src/forge",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-config=pyproject.toml",
+    "--durations=0"
+]
+python_files = "test_*.py"
+testpaths = ["test/"]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+source = ["src/forge"]
+concurrency = ["multiprocessing"]
+
+[tool.coverage.paths]
+forge = [
+  "src/forge",
+  "*/site-packages/forge"
+]
+
+[tool.coverage.report]
+omit = ["test/*"]
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+respect-gitignore = true
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+]
+ignore = ["E501", "B006", "E731", "A002", "E203"]
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+known-first-party = ["forge"]
+force-single-line = true
+lines-between-types = 1
