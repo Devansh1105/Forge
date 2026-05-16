@@ -8,6 +8,9 @@ venv/
 .vscode/
 .idea/
 
+.claude
+.codex
+
 # Misc
 .DS_Store
 
