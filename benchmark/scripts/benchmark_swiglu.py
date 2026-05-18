@@ -1,71 +1,110 @@
-"""Simple SwiGLU benchmark sample.
-
-Run on a CUDA machine:
-
-    PYTHONPATH=src python benchmark/scripts/benchmark_swiglu.py --rows 4096 --cols 11008 --dtype bf16
-"""
-
-import argparse
-
 import torch
-import triton
 
-from forge.ops import ForgeSiLUMulFunction
+from benchmark_model_configs import MODEL_REGISTRY
+from benchmark_model_configs import build_model_config_sweep
+from benchmark_model_configs import build_token_length_sweep
+from benchmark_model_configs import get_benchmark_model_config
+from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import LlamaMLP
+from utils import SingleBenchmarkRunInput
+from utils import build_memory_bench_fn
+from utils import build_speed_bench_fn
+from utils import parse_benchmark_script_args
+from utils import run_benchmarks
 
+from forge.transformers.swiglu import ForgeSwiGLUMLP
+from forge.utils import infer_device
 
-def _dtype(name: str):
-    if name == "fp32":
-        return torch.float32
-    if name == "bf16":
-        return torch.bfloat16
-    raise ValueError(f"unsupported dtype: {name}")
-
-
-def _reference(gate, up):
-    return torch.nn.functional.silu(gate) * up
-
-
-def _bench_forward(fn):
-    torch.cuda.synchronize()
-    return triton.testing.do_bench(fn)
+device = infer_device()
 
 
-def _bench_full(fn, gate, up):
-    def run():
-        gate.grad = None
-        up.grad = None
-        out = fn(gate, up)
-        out.backward(torch.ones_like(out))
+def setup_swiglu(input: SingleBenchmarkRunInput):
+    """Create input tensor and SwiGLU layer from benchmark config."""
+    cfg = input.extra_benchmark_config
+    if isinstance(input.x, str):
+        model_cfg = MODEL_REGISTRY[input.x]
+        seq_len = cfg["seq_len"]
+        hidden_size = model_cfg.hidden_size
+        intermediate_size = model_cfg.intermediate_size
+        dtype = model_cfg.dtype
+    else:
+        seq_len = input.x
+        hidden_size = cfg["hidden_size"]
+        intermediate_size = cfg["intermediate_size"]
+        dtype = cfg["dtype"]
 
-    torch.cuda.synchronize()
-    return triton.testing.do_bench(run)
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--rows", type=int, default=4096)
-    parser.add_argument("--cols", type=int, default=11008)
-    parser.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16")
-    args = parser.parse_args()
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("benchmark_swiglu.py requires CUDA")
-
-    dtype = _dtype(args.dtype)
-    gate = torch.randn(args.rows, args.cols, device="cuda", dtype=dtype, requires_grad=True)
-    up = torch.randn(args.rows, args.cols, device="cuda", dtype=dtype, requires_grad=True)
-
-    forge_forward_ms = _bench_forward(lambda: ForgeSiLUMulFunction.apply(gate, up))
-    torch_forward_ms = _bench_forward(lambda: _reference(gate, up))
-    forge_full_ms = _bench_full(lambda a, b: ForgeSiLUMulFunction.apply(a, b), gate, up)
-    torch_full_ms = _bench_full(_reference, gate, up)
-
-    print(f"shape=({args.rows}, {args.cols}) dtype={args.dtype}")
-    print(f"forward_ms forge={forge_forward_ms:.4f} torch={torch_forward_ms:.4f}")
-    print(f"full_ms    forge={forge_full_ms:.4f} torch={torch_full_ms:.4f}")
-    print(f"speedup_forward={torch_forward_ms / forge_forward_ms:.3f}x")
-    print(f"speedup_full={torch_full_ms / forge_full_ms:.3f}x")
+    llama_config = LlamaConfig(
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        hidden_act=cfg["hidden_act"],
+    )
+    x = torch.randn(
+        cfg["bsz"],
+        seq_len,
+        hidden_size,
+        device=device,
+        dtype=dtype,
+        requires_grad=True,
+    )
+    if input.kernel_provider == "forge":
+        layer = ForgeSwiGLUMLP(config=llama_config).to(device).to(dtype)
+    elif input.kernel_provider == "huggingface":
+        layer = LlamaMLP(config=llama_config).to(device).to(dtype)
+    else:
+        raise ValueError(f"Invalid provider: {input.kernel_provider} for SwiGLU")
+    return x, layer
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_benchmark_script_args()
+
+    if args.sweep_mode == "model_config":
+        common_configs = build_model_config_sweep(
+            kernel_name="swiglu",
+            setup_fn=setup_swiglu,
+            model_keys=["hidden_size", "intermediate_size", "dtype"],
+            probe_provider="huggingface",
+            extra_configs={
+                "bsz": 1,
+                "hidden_act": "silu",
+            },
+            probe_dim="T",
+            bt=args.bt,
+            overwrite=args.overwrite,
+        )
+    else:
+        model = get_benchmark_model_config(args.model)
+        probe_seq_len = 1024
+
+        common_configs = build_token_length_sweep(
+            kernel_name="swiglu",
+            probe_x=probe_seq_len,
+            model=model,
+            setup_fn=setup_swiglu,
+            model_keys=["hidden_size", "intermediate_size", "dtype"],
+            extra_configs={
+                "bsz": 1,
+                "hidden_act": "silu",
+            },
+            scale_dim="T",
+            x_label="total tokens",
+            probe_provider="huggingface",
+            overwrite=args.overwrite,
+        )
+
+    common_configs["kernel_providers"] = ["huggingface", "forge"]
+
+    run_benchmarks(
+        bench_test_fn=build_speed_bench_fn(setup_swiglu),
+        kernel_operation_modes=["forward", "backward", "full"],
+        metric_name="speed",
+        metric_unit="ms",
+        **common_configs,
+    )
+    run_benchmarks(
+        bench_test_fn=build_memory_bench_fn(setup_swiglu),
+        kernel_operation_modes=["full", "forward", "backward"],
+        metric_name="memory",
+        metric_unit="MB",
+        **common_configs,
+    )

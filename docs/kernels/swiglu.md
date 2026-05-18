@@ -24,7 +24,7 @@ y = down_proj(silu(gate_proj(x)) * up_proj(x))
 - `src/forge/ops/swiglu.py`: Triton forward/backward kernels and autograd function.
 - `src/forge/transformers/swiglu.py`: minimal MLP wrapper.
 - `test/kernels/test_swiglu.py`: correctness checks against PyTorch.
-- `benchmark/scripts/benchmark_swiglu.py`: simple benchmark against PyTorch.
+- `benchmark/scripts/benchmark_swiglu.py`: Liger-style benchmark against Hugging Face.
 - `benchmark/personal/devansh/swiglu/README.md`: personal benchmark notes template.
 
 ## Triton Mapping
@@ -56,7 +56,17 @@ Example:
 
 ```bash
 PYTHONPATH=src python benchmark/scripts/benchmark_swiglu.py \
-  --rows 4096 \
-  --cols 11008 \
-  --dtype bf16
+  --sweep-mode token_length \
+  --model llama_3_8b \
+  --overwrite
+```
+
+Visualize:
+
+```bash
+python benchmark/benchmarks_visualizer.py \
+  --kernel-name swiglu \
+  --metric-name speed \
+  --kernel-operation-mode full \
+  --overwrite
 ```

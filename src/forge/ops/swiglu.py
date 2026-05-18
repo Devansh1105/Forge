@@ -1,10 +1,3 @@
-"""Sample SwiGLU Triton op.
-
-Adapted from LinkedIn's Liger Kernel SwiGLU implementation under BSD-2-Clause.
-Original copyright: Copyright 2024 LinkedIn Corporation.
-This is intentionally small and kept as a readable Forge reference sample.
-"""
-
 import torch
 import triton
 import triton.language as tl
@@ -14,118 +7,170 @@ from forge.ops.utils import ensure_contiguous
 
 
 @triton.jit
-def _silu(x):
+def silu(x):
     return x * tl.sigmoid(x)
 
 
 @triton.jit
 def _swiglu_forward_kernel(
-    gate_ptr,
-    up_ptr,
-    out_ptr,
-    stride,
-    n_cols: tl.constexpr,
-    block_size: tl.constexpr,
+    a_ptr, b_ptr, c_ptr, stride, gate_multiplier, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
 ):
-    row_id = tl.program_id(0).to(tl.int64)
-    offsets = tl.arange(0, block_size)
-    mask = offsets < n_cols
+    program_id = tl.program_id(0).to(tl.int64)
 
-    gate_ptr += row_id * stride
-    up_ptr += row_id * stride
-    out_ptr += row_id * stride
+    # locate start index
+    a_ptr += program_id * stride
+    b_ptr += program_id * stride
+    c_ptr += program_id * stride
 
-    gate = tl.load(gate_ptr + offsets, mask=mask, other=0).to(tl.float32)
-    up = tl.load(up_ptr + offsets, mask=mask, other=0)
-    out = _silu(gate).cast(up.dtype) * up
-    tl.store(out_ptr + offsets, out, mask=mask)
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
+
+    # sigmoid requires type float32
+    a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32) * gate_multiplier
+    b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
+    c_row = silu(a_row).cast(b_row.dtype) * b_row
+    tl.store(c_ptr + col_offsets, c_row, mask=mask)
 
 
 @triton.jit
 def _swiglu_backward_kernel(
-    grad_out_ptr,
-    gate_ptr,
-    up_ptr,
-    stride,
-    n_cols: tl.constexpr,
-    block_size: tl.constexpr,
+    dc_ptr, a_ptr, b_ptr, stride, gate_multiplier, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
 ):
-    row_id = tl.program_id(0).to(tl.int64)
-    offsets = tl.arange(0, block_size)
-    mask = offsets < n_cols
+    program_id = tl.program_id(0).to(tl.int64)
 
-    grad_out_ptr += row_id * stride
-    gate_ptr += row_id * stride
-    up_ptr += row_id * stride
+    # locate start index
+    dc_ptr += program_id * stride
+    a_ptr += program_id * stride
+    b_ptr += program_id * stride
 
-    grad_out = tl.load(grad_out_ptr + offsets, mask=mask, other=0)
-    gate = tl.load(gate_ptr + offsets, mask=mask, other=0).to(tl.float32)
-    up = tl.load(up_ptr + offsets, mask=mask, other=0)
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
 
-    sigmoid_gate = tl.sigmoid(gate)
-    silu_gate = gate * sigmoid_gate
-    grad_up = grad_out * silu_gate
-    grad_gate = grad_out * (silu_gate * (1 - sigmoid_gate) + sigmoid_gate) * up
+    dc_row = tl.load(dc_ptr + col_offsets, mask=mask, other=0)
+    # sigmoid requires type float32
+    a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32) * gate_multiplier
+    b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
 
-    # Store into saved activation buffers. Autograd returns these as gradients.
-    tl.store(gate_ptr + offsets, grad_gate, mask=mask)
-    tl.store(up_ptr + offsets, grad_up, mask=mask)
+    # recomputation to save memory. a_row already holds a * gate_multiplier.
+    sig_a = tl.sigmoid(a_row)
+    silu_a = a_row * sig_a
+    db_row = dc_row * silu_a
+    # chain rule pulls an extra factor of gate_multiplier through the pre-activation scaling
+    da_row = dc_row * (silu_a * (1 - sig_a) + sig_a) * b_row * gate_multiplier
+
+    tl.store(a_ptr + col_offsets, da_row, mask=mask)
+    tl.store(b_ptr + col_offsets, db_row, mask=mask)
 
 
-def swiglu_forward(gate: torch.Tensor, up: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute `silu(gate) * up` over the last dimension."""
+def swiglu_forward(a, b, gate_multiplier: float = 1.0):
+    ori_shape = a.shape
 
-    original_shape = gate.shape
-    n_cols = original_shape[-1]
-    gate_2d = gate.view(-1, n_cols)
-    up_2d = up.view(-1, n_cols)
-    out = torch.empty_like(gate_2d)
+    n_cols = ori_shape[-1]
+    a = a.view(-1, n_cols)
+    b = b.view(-1, n_cols)
+    c = torch.empty_like(a)
+    n_rows = a.shape[0]
 
-    block_size, num_warps = calculate_settings(n_cols)
-    _swiglu_forward_kernel[(gate_2d.shape[0],)](
-        gate_2d,
-        up_2d,
-        out,
-        out.stride(0),
+    BLOCK_SIZE, num_warps = calculate_settings(n_cols)
+
+    _swiglu_forward_kernel[(n_rows,)](
+        a,
+        b,
+        c,
+        c.stride(-2),
+        float(gate_multiplier),
         n_cols=n_cols,
-        block_size=block_size,
+        BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
     )
-    return gate_2d, up_2d, out.view(*original_shape)
+    return a, b, c.view(*ori_shape)
 
 
-def swiglu_backward(gate: torch.Tensor, up: torch.Tensor, grad_out: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute gradients for `silu(gate) * up`."""
+def swiglu_backward(a, b, dc, gate_multiplier: float = 1.0):
+    ori_shape = dc.shape
+    n_cols = ori_shape[-1]
+    dc = dc.view(-1, n_cols)
+    n_rows = dc.shape[0]
 
-    original_shape = grad_out.shape
-    n_cols = original_shape[-1]
-    grad_out_2d = grad_out.view(-1, n_cols)
+    BLOCK_SIZE, num_warps = calculate_settings(n_cols)
 
-    block_size, num_warps = calculate_settings(n_cols)
-    _swiglu_backward_kernel[(grad_out_2d.shape[0],)](
-        grad_out_2d,
-        gate,
-        up,
-        grad_out_2d.stride(0),
+    _swiglu_backward_kernel[(n_rows,)](
+        dc,
+        a,
+        b,
+        dc.stride(-2),
+        float(gate_multiplier),
         n_cols=n_cols,
-        block_size=block_size,
+        BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
     )
-    return gate.view(*original_shape), up.view(*original_shape)
+    return a.view(*ori_shape), b.view(*ori_shape)
 
 
 class ForgeSiLUMulFunction(torch.autograd.Function):
-    """Autograd wrapper for the sample SwiGLU elementwise fusion."""
+    @staticmethod
+    @ensure_contiguous
+    def forward(ctx, a, b, gate_multiplier: float = 1.0, down_multiplier: float = 1.0):
+        gate_multiplier = float(gate_multiplier)
+        down_multiplier = float(down_multiplier)
+        ctx.gate_multiplier = gate_multiplier
+        ctx.down_multiplier = down_multiplier
+
+        if isinstance(a, torch.distributed.tensor.DTensor) or isinstance(b, torch.distributed.tensor.DTensor):
+            device_mesh, placements = (
+                (a.device_mesh, a.placements)
+                if isinstance(a, torch.distributed.tensor.DTensor)
+                else (b.device_mesh, b.placements)
+            )
+
+            # Assume that full tensors are gathered before and identical across
+            # the associated process groups.
+            if not isinstance(a, torch.distributed.tensor.DTensor):
+                a = torch.distributed.tensor.distribute_tensor(a, device_mesh=device_mesh, placements=placements)
+            if not isinstance(b, torch.distributed.tensor.DTensor):
+                b = torch.distributed.tensor.distribute_tensor(b, device_mesh=device_mesh, placements=placements)
+            a_local, b_local, c_local = swiglu_forward(a.to_local(), b.to_local(), gate_multiplier)
+            if down_multiplier != 1.0:
+                c_local = c_local * down_multiplier
+            ctx.save_for_backward(a_local, b_local)
+            ctx.dtensor_metadata = (device_mesh, placements)
+            return torch.distributed.tensor.DTensor.from_local(c_local, device_mesh, placements)
+        else:
+            a, b, c = swiglu_forward(a, b, gate_multiplier)
+            if down_multiplier != 1.0:
+                c = c * down_multiplier
+            ctx.save_for_backward(a, b)
+            ctx.dtensor_metadata = None
+            return c
 
     @staticmethod
     @ensure_contiguous
-    def forward(ctx, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-        gate, up, out = swiglu_forward(gate, up)
-        ctx.save_for_backward(gate, up)
-        return out
+    def backward(ctx, dc):
+        a, b = ctx.saved_tensors
+        gate_multiplier = ctx.gate_multiplier
+        down_multiplier = ctx.down_multiplier
 
-    @staticmethod
-    @ensure_contiguous
-    def backward(ctx, grad_out: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        gate, up = ctx.saved_tensors
-        return swiglu_backward(gate, up, grad_out)
+        if ctx.dtensor_metadata is not None:
+            device_mesh, placements = ctx.dtensor_metadata
+
+            # Assume that full tensors are gathered before and identical across
+            # the associated process groups.
+            dc_local = (
+                dc.to_local()
+                if isinstance(dc, torch.distributed.tensor.DTensor)
+                else torch.distributed.tensor.distribute_tensor(dc, device_mesh=device_mesh, placements=placements)
+            )
+            if down_multiplier != 1.0:
+                dc_local = dc_local * down_multiplier
+            a_local, b_local = swiglu_backward(a, b, dc_local, gate_multiplier)
+            return (
+                torch.distributed.tensor.DTensor.from_local(a_local, device_mesh, placements),
+                torch.distributed.tensor.DTensor.from_local(b_local, device_mesh, placements),
+                None,
+                None,
+            )
+
+        if down_multiplier != 1.0:
+            dc = dc * down_multiplier
+        a, b = swiglu_backward(a, b, dc, gate_multiplier)
+        return a, b, None, None

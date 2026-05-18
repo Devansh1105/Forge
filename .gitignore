@@ -26,5 +26,6 @@ uv.lock
 
 # Benchmark images
 benchmark/visualizations
+benchmark/data/
 .vscode/
 .coverage

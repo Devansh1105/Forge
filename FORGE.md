@@ -9,6 +9,9 @@ optimization platform inspired by Liger and Unsloth.
 - Keep a Liger-like kernel workflow during Week 1.
 - Put Triton kernels in `src/forge/ops/`.
 - Put PyTorch/autograd or module wrappers in `src/forge/transformers/`.
+- Put architecture-specific patching modules in `src/forge/transformers/model/`.
+- Put trainer integrations in `src/forge/transformers/trainer/`.
+- Put unstable transformer experiments in `src/forge/transformers/experimental/`.
 - Put future patch/unpatch integration code in `src/forge/patching/`.
 - Put kernel correctness tests under `test/kernels/`.
 - Put model integration tests under `test/integration/`.
@@ -29,6 +32,19 @@ Every kernel PR should include:
 - A shared benchmark script under `benchmark/scripts/` when the kernel is ready.
 - A concise docs page in `docs/kernels/`.
 
+Current full reference sample:
+
+- `src/forge/ops/swiglu.py`
+- `src/forge/ops/fused_moe.py`
+- `src/forge/ops/fused_moe_kernels.py`
+- `src/forge/transformers/swiglu.py`
+- `src/forge/transformers/functional.py`
+- `test/kernels/test_swiglu.py`
+- `benchmark/scripts/benchmark_swiglu.py`
+- `benchmark/scripts/utils.py`
+- `benchmark/scripts/benchmark_model_configs.py`
+- `docs/kernels/swiglu.md`
+
 
 ## Near-Term Roadmap
 
@@ -46,4 +62,3 @@ Every kernel PR should include:
 Forge is currently using a BSD 2-Clause license. If the team later copies or
 adapts third-party code, preserve the original license and attribution in the
 same PR.
-

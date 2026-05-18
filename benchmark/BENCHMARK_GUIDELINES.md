@@ -11,6 +11,8 @@ Minimum benchmark requirements:
 - Synchronize before reading timings.
 - Record peak memory where relevant.
 - Include A100/H100 details when reporting results.
+- Write shared benchmark results to `benchmark/data/all_benchmark_data.csv`.
+- Make the output plottable by `benchmark/benchmarks_visualizer.py`.
 
 Avoid making broad performance claims from one shape. Report the exact shapes
 and dtypes used.
